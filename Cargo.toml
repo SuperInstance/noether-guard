@@ -5,7 +5,12 @@ edition = "2021"
 description = "Physics linter — verify conservation laws in simulations using Noether's theorem"
 license = "MIT"
 repository = "https://github.com/SuperInstance/noether-guard"
+documentation = "https://docs.rs/noether-guard"
+readme = "README.md"
+homepage = "https://github.com/SuperInstance/noether-guard"
+rust-version = "1.70"
 keywords = ["physics", "conservation", "noether", "simulation", "verification"]
+categories = ["science", "simulation"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
