@@ -4,87 +4,101 @@
 [![docs.rs](https://docs.rs/noether-guard/badge.svg)](https://docs.rs/noether-guard)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**Static analysis for physics simulations — verify conservation laws at runtime.**
+## The Problem
 
-Noether's theorem states that every continuous symmetry of a system implies a
-conserved quantity:
+Every physics simulation drifts. A molecular dynamics simulation that should conserve energy slowly heats up. An orbital mechanics integrator bleeds angular momentum. A multi-agent system that should conserve total "fleet energy" develops phantom forces.
 
-| Symmetry | Conserved Quantity |
+Most simulation code doesn't check. By the time you notice the orbit is wrong, the conservation violation happened millions of timesteps ago. **Noether-guard** catches violations as they happen and — more importantly — tells you the *scale* at which your simulation breaks.
+
+## The Idea
+
+Emmy Noether proved that every continuous symmetry implies a conserved quantity:
+
+| If your system is symmetric under... | ...then this is conserved |
 |---|---|
-| Time translation | Energy |
-| Spatial translation | Momentum |
-| Rotation | Angular Momentum |
-| Gauge | Charge |
+| Time translation | Total energy |
+| Spatial translation | Linear momentum (3 components) |
+| Rotation | Angular momentum (3 components) |
+| Gauge transformation | Charge / particle number |
 
-`noether-guard` instruments your simulation to check these conservation laws at
-every timestep, pinpoint exactly where they break, and analyze the scale at which
-drift becomes significant using renormalization-group-style coarse-graining.
+This crate instruments your simulation loop to monitor any or all of these. But it goes further: it uses **renormalization-group-style coarse-graining** to find the breaking scale. If your simulation conserves energy at Δt = 0.001 but violates it at Δt = 0.01, noether-guard tells you exactly where the transition happens and how fast the violation grows.
 
-## Features
+## How It Works
 
-- **Conservation monitoring** — track energy, momentum, angular momentum, and
-  custom conserved quantities across simulation timesteps
-- **Prebuilt presets** — `ConservationMonitor::newtonian()` for full Newtonian
-  mechanics (7 components), `ConservationMonitor::hamiltonian()` for Hamiltonian
-  systems (energy only)
-- **Drift detection** — `DriftDetector` records drift samples, flags violations,
-  and reports the first violation time
-- **Renormalization group analysis** — `RenormalizationGroup` coarse-grains drift
-  data across scales, computes beta functions, and finds the breaking scale where
-  conservation fails
-- **Rich reporting** — text and JSON reports with per-law violation counts,
-  health scores (0–1), and breaking scales
-- **Custom symmetry groups** — define gauge symmetries with arbitrary generators
-- **Zero-allocation monitoring** — lightweight tick-based API for hot loops
-
-## Quick Start
+You create a `ConservationMonitor`, add the conservation laws you care about, and call `.tick()` at each timestep with the current values:
 
 ```rust
 use noether_guard::ConservationMonitor;
 
-// Monitor a Newtonian system (energy + momentum + angular momentum = 7 values)
-let mut monitor = ConservationMonitor::newtonian(0.01);
-
-// Feed [energy, px, py, pz, lx, ly, lz] at each timestep
-monitor.tick(0.0, &[10.0, 1.0, 0.0, 0.0, 0.5, 0.0, 0.0]).unwrap();
-monitor.tick(0.1, &[10.0, 1.0, 0.0, 0.0, 0.5, 0.0, 0.0]).unwrap();
-
-// Check system health
-println!("Health: {:.1}%", monitor.health() * 100.0);
-println!("Violations: {}", monitor.total_violations());
-
-// Full report
-let report = monitor.report();
-println!("{report}");
+// Preset: Newtonian mechanics = energy + 3 momentum + 3 angular momentum
+let mut monitor = ConservationMonitor::newtonian(tolerance);
+monitor.tick(t, &[energy, px, py, pz, lx, ly, lz]).unwrap();
 ```
 
-## Custom Conservation Laws
+Internally, each tick:
+1. **DriftDetector** records the deviation from the initial value
+2. Flags violations that exceed the tolerance
+3. Optionally, **RenormalizationGroup** coarse-grains the drift history at multiple scales (block-averaging, similar to RG flow in statistical mechanics) and computes "beta functions" — how the violation scales changes as you zoom out
+
+The RG analysis is the key insight: a violation that appears random at fine scales but systematic at coarse scales indicates a *structural* bug (wrong integrator, missing force term). A violation that's consistent across scales indicates a *numerical* issue (timestep too large, precision loss).
+
+## Breaking Scale Detection
+
+```rust
+use noether_guard::{ConservationMonitor, RenormalizationGroup};
+
+let rg = monitor.renormalize();
+for (scale, beta) in &rg.beta_functions {
+    println!("Scale {}: drift grows as {:.4}", scale, beta);
+}
+// If beta jumps sharply at some scale, that's your breaking point
+```
+
+## Presets
+
+| Preset | Laws | Components |
+|---|---|---|
+| `newtonian()` | Energy + Momentum + Angular Momentum | 7 |
+| `hamiltonian()` | Energy only | 1 |
+| Custom | Any `ConservationLaw` you define | any |
+
+## Custom Laws
 
 ```rust
 use noether_guard::{ConservationMonitor, ConservationLaw, Symmetry};
 
 let mut monitor = ConservationMonitor::new();
-monitor.add_law(ConservationLaw::new(Symmetry::TimeTranslation, 100.0, 0.05));
-monitor.add_law(ConservationLaw::new(Symmetry::SpatialTranslation, 0.0, 0.01));
+monitor.add_law(ConservationLaw::new(
+    Symmetry::Custom("fleet_gamma".into()),
+    initial_value,
+    tolerance,
+));
 ```
 
-## Module Overview
+## Module Map
 
-| Module | Description |
+| Module | What's in it |
 |---|---|
-| `conservation` | `ConservationLaw` and `ConservedQuantity` types |
-| `monitor` | `ConservationMonitor` — main tick-based API |
-| `drift` | `DriftDetector` — per-law drift tracking |
-| `renormalize` | `RenormalizationGroup` — multi-scale drift analysis |
-| `symmetry` | `Symmetry` and `SymmetryGroup` — symmetry classification |
-| `report` | `Report` and `Violation` — text/JSON output |
-| `error` | Error types |
+| `conservation` | `ConservationLaw`, `ConservedQuantity` — what you're monitoring |
+| `monitor` | `ConservationMonitor` — the main tick-based API |
+| `drift` | `DriftDetector` — per-law drift tracking and violation flagging |
+| `renormalize` | `RenormalizationGroup` — multi-scale breaking-scale analysis |
+| `symmetry` | `Symmetry`, `SymmetryGroup` — classify which Noether symmetry |
+| `report` | `Report`, `Violation` — human-readable and JSON output |
+| `error` | `NoetherError` |
+
+## When To Use This
+
+- You're writing a physics simulation and want conservation-law violations detected immediately
+- You're debugging an integrator and need to know *where* it breaks, not just *that* it breaks
+- You're running multi-agent fleet simulations with conservation constraints (total fleet energy, total charge, etc.)
+- You need a CI check: "does my simulation conserve energy to 6 significant figures?"
 
 ## Links
 
 - [Documentation](https://docs.rs/noether-guard)
-- [Repository](https://github.com/nightshift-crates/noether-guard)
-- [Crates.io](https://crates.io/crates/noether-guard)
+- [Repository](https://github.com/SuperInstance/noether-guard)
+- [crates.io](https://crates.io/crates/noether-guard)
 
 ## License
 
